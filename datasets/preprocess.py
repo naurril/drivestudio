@@ -210,7 +210,6 @@ if __name__ == "__main__":
     elif args.dataset == "suscape":
         from datasets.suscape.suscape_preprocess import SuscapeProcessor
         
-        scene_ids_list = [int(scene_id) for scene_id in scene_ids_list]
         dataset_processor = SuscapeProcessor(
             load_dir=args.data_root,
             save_dir=args.target_dir,
@@ -259,8 +258,8 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Unknown dataset {args.dataset}, please choose from waymo, pandaset, argoverse, nuscenes, kitti, nuplan")
 
-    if args.scene_ids is not None and args.workers == 1:
-        for scene_id in args.scene_ids:
+    if  args.workers == 1:
+        for scene_id in scene_ids_list:
             dataset_processor.convert_one(scene_id)
     else:
         dataset_processor.convert()

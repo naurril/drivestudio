@@ -11,7 +11,7 @@ from suscape.dataset import SuscapeDataset
 from datasets.tools.multiprocess_utils import track_parallel_progress
 from utils.visualization import dump_3d_bbox_on_image, color_mapper
 import open3d as o3d
-from pypcd import pypcd  # 尝试先用 pypcd 读 intensity，失败就 fallback
+# from pypcd import pypcd  # 尝试先用 pypcd 读 intensity，失败就 fallback
 
 SUSCAPE_LABELS = [
     "Car",
@@ -101,7 +101,39 @@ SUSCAP_DYNAMIC_CLASSES = SUSCAP_NONRIGID_DYNAMIC_CLASSES + SUSCAP_RIGID_DYNAMIC_
 # valid_ring_cams = set([x.value for x in RingCameras])
 # valid_stereo_cams = set([x.value for x in StereoCameras])
 
-class SUScapeProcessor(object):
+def euler_angle_to_rotate_matrix(eu, t):  # ZYX order.
+            import math
+            theta = eu
+            #Calculate rotation about x axis
+            R_x = np.array([
+                [1,       0,              0],
+                [0,       math.cos(theta[0]),   -math.sin(theta[0])],
+                [0,       math.sin(theta[0]),   math.cos(theta[0])]
+            ])
+
+            #Calculate rotation about y axis
+            R_y = np.array([
+                [math.cos(theta[1]),      0,      math.sin(theta[1])],
+                [0,                       1,      0],
+                [-math.sin(theta[1]),     0,      math.cos(theta[1])]
+            ])
+
+            #Calculate rotation about z axis
+            R_z = np.array([
+                [math.cos(theta[2]),    -math.sin(theta[2]),      0],
+                [math.sin(theta[2]),    math.cos(theta[2]),       0],
+                [0,               0,                  1]])
+
+            R = np.matmul(R_x, np.matmul(R_y, R_z))
+
+            t = t.reshape([-1,1])
+            R = np.concatenate([R,t], axis=-1)
+            R = np.concatenate([R, np.array([0,0,0,1]).reshape([1,-1])], axis=0)
+            return R
+
+
+
+class SuscapeProcessor(object):
 
     """Process SUScape.
     
@@ -163,7 +195,7 @@ class SUScapeProcessor(object):
         self.workers = int(workers)
         self.suscapeloader = SuscapeDataset(self.load_dir)
         # a list of tfrecord pathnames
-        self.training_files = open("data/argoverse_train_list.txt").read().splitlines()
+        self.training_files = open("data/suscape_train_list.txt").read().splitlines()
         self.log_pathnames = [
             f"{self.load_dir}/{f}" for f in self.training_files
         ]
@@ -226,10 +258,10 @@ class SUScapeProcessor(object):
         infos = self.suscapeloader.get_scene_info(scene_idx)
 
         frames = infos['frames']
-        lidar_indices = self.get_lidar_indices(
-            self.training_files[scene_idx]
-        )
-        lidar_indices = self.filter_lidar_indices(lidar_indices)        
+        # lidar_indices = self.get_lidar_indices(
+        #     self.training_files[scene_idx]
+        # )
+        # lidar_indices = self.filter_lidar_indices(lidar_indices)        
         # process each frame
         num_frames = len(frames)
         for idx, frame_idx in tqdm(
@@ -255,7 +287,7 @@ class SUScapeProcessor(object):
                 
         # sort and save objects info
         if "objects" in self.process_keys:
-            instances_info, frame_instances = self.save_objects(scene_idx)
+            instances_info, frame_instances = self.save_objects(infos)
             print(f"Processed instances info for {scene_idx}")
             
             # Save instances info and frame instances
@@ -265,14 +297,14 @@ class SUScapeProcessor(object):
             with open(f"{object_info_dir}/frame_instances.json", "w") as fp:
                 json.dump(frame_instances, fp, indent=4)
             
-            # verbose: visualize the instances on the image (Debug Usage)
-            if "objects_vis" in self.process_keys:
-                self.visualize_dynamic_objects(
-                    scene_idx, lidar_indices,
-                    instances_info=instances_info,
-                    frame_instances=frame_instances
-                )
-                print(f"Processed objects visualization for {scene_idx}")
+            # # verbose: visualize the instances on the image (Debug Usage)
+            # if "objects_vis" in self.process_keys:
+            #     self.visualize_dynamic_objects(
+            #         scene_idx, lidar_indices,
+            #         instances_info=instances_info,
+            #         frame_instances=frame_instances
+            #     )
+            #     print(f"Processed objects visualization for {scene_idx}")
 
     def __len__(self):
         """Length of the filename list."""
@@ -373,7 +405,7 @@ class SUScapeProcessor(object):
         os.makedirs(os.path.dirname(pc_path), exist_ok=True)
         point_cloud.astype(np.float32).tofile(pc_path)
 
-    def save_pose(self, datum: SuscapeDataset, scene_idx, frame_idx, infos):
+    def save_pose(self, idx, scene_idx, frame_idx, infos):
         """Parse and save the pose data.
 
         Args:
@@ -553,68 +585,64 @@ class SUScapeProcessor(object):
             # 保存 mask
             Image.fromarray(dynamic_mask, mode="L").save(dynamic_mask_path)
             
-    def save_objects(self, lidar_indices: List[int]):
-        """Parse and save the objects annotation data.
+    def save_objects(self, scene_info):
+        scene = scene_info["scene"]
+        frames = scene_info['frames']
+
+
+        frame_instances = {}
+
+        instances_info = {}
+
+        # from suscape_utils import euler_angle_to_rotate_matrix
+
+
+    
         
-        Args:
-            lidar_indices (list): List of lidar indices.
-        """
-        instances_info, frame_instances = {}, {}
-        for frame_idx, lidar_idx in enumerate(lidar_indices):
-            datum = self.av2loader[lidar_idx]
-            annotations = datum.annotations
-            sweep = datum.sweep
-            timestamp_city_SE3_ego_dict = datum.timestamp_city_SE3_ego_dict
-            
-            frame_instances[frame_idx] = []
-            for cuboid_idx in range(len(annotations)):
-                cuboid = annotations[cuboid_idx]
-                track_id, label = cuboid.track_uuid, cuboid.category
-                if label not in SUSCAP_DYNAMIC_CLASSES:
-                    continue
-                
-                if track_id not in instances_info:
-                    instances_info[track_id] = dict(
-                        id=track_id,
-                        class_name=label,
-                        frame_annotations={
-                            "frame_idx": [],
-                            "obj_to_world": [],
-                            "box_size": [],
+
+        for f_idx, f in enumerate(frames):
+
+            objs = self.suscapeloader.read_label(scene, f)
+            objs = objs['objs']
+            # print(objs)
+            frame_instances[str(f_idx)] = [int(x['obj_id']) for x in objs]
+
+            # read lidar pos
+            lidar_pose_path = self.load_dir+'/'+scene+'/lidar_pose/'+f+'.json'
+            with open(lidar_pose_path, "r") as fp:
+                data = json.load(fp)
+            lidar_pose = np.array(data['lidarPose'], dtype=np.float64).reshape(4,4)
+
+            for obj in objs:
+                obj_id = obj['obj_id']
+                if obj_id not in instances_info:
+                    instances_info[obj_id] = {
+                        'id': obj_id,
+                        "class_name": obj['obj_type'],
+                        'frame_annotations': {
+                            'frame_idx': [],
+                            'obj_to_world': [],
+                            'box_size': [],
                         }
-                    )
-                
-                o2v = cuboid.dst_SE3_object.transform_matrix
-                v2w = timestamp_city_SE3_ego_dict[sweep.timestamp_ns].transform_matrix
-                # [object to  world] transformation matrix
-                o2w = v2w @ o2v
-                
-                # Dimensions of the box. length: dim x. width: dim y. height: dim z.
-                # length: dim_x: along heading; dim_y: verticle to heading; dim_z: verticle up
-                dimension = [cuboid.length_m, cuboid.width_m, cuboid.height_m]
-                
-                instances_info[track_id]['frame_annotations']['frame_idx'].append(frame_idx)
-                instances_info[track_id]['frame_annotations']['obj_to_world'].append(o2w.tolist())
-                instances_info[track_id]['frame_annotations']['box_size'].append(dimension)
-                
-                frame_instances[frame_idx].append(track_id)
+                    }
 
-        # Correct ID mapping
-        id_map = {}
-        for i, (k, v) in enumerate(instances_info.items()):
-            id_map[v["id"]] = i
+                box_size = [obj['psr']['scale']['x'], obj['psr']['scale']['y'], obj['psr']['scale']['z']]
+                
+                euler_angle = np.array([obj['psr']['rotation']['x'], obj['psr']['rotation']['y'], obj['psr']['rotation']['z']])
+                translate = np.array([obj['psr']['position']['x'], obj['psr']['position']['y'], obj['psr']['position']['z']])
+                obj_pose = euler_angle_to_rotate_matrix(euler_angle, translate)
+                obj_to_world = lidar_pose @ obj_pose
 
-        # Update keys in instances_info
-        new_instances_info = {}
-        for k, v in instances_info.items():
-            new_instances_info[id_map[v["id"]]] = v
+                obj_to_world = obj_to_world.tolist()
 
-        # Update keys in frame_instances
-        new_frame_instances = {}
-        for k, v in frame_instances.items():
-            new_frame_instances[k] = [id_map[i] for i in v]
+                instances_info[obj_id]['frame_annotations']['frame_idx'].append(f_idx)
+                instances_info[obj_id]['frame_annotations']['obj_to_world'].append(obj_to_world)
+                instances_info[obj_id]['frame_annotations']['box_size'].append(box_size)
+                
 
-        return new_instances_info, new_frame_instances
+
+        return frame_instances, instances_info
+        
 
     def create_folder(self):
         """Create folder for data preprocessing."""
