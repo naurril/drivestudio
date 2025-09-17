@@ -287,7 +287,7 @@ class SuscapeProcessor(object):
                 
         # sort and save objects info
         if "objects" in self.process_keys:
-            instances_info, frame_instances = self.save_objects(infos)
+            frame_instances, instances_info  = self.save_objects(infos)
             print(f"Processed instances info for {scene_idx}")
             
             # Save instances info and frame instances
