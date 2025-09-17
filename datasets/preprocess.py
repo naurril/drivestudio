@@ -207,6 +207,18 @@ if __name__ == "__main__":
             process_id_list=scene_ids_list,
             workers=args.workers,
         )
+    elif args.dataset == "suscape":
+        from datasets.suscape.suscape_preprocess import SuscapeProcessor
+        
+        scene_ids_list = [int(scene_id) for scene_id in scene_ids_list]
+        dataset_processor = SuscapeProcessor(
+            load_dir=args.data_root,
+            save_dir=args.target_dir,
+            process_keys=args.process_keys,
+            process_id_list=scene_ids_list,
+            workers=args.workers,
+        )
+        
     elif args.dataset == "nuscenes":
         from datasets.nuscenes.nuscenes_preprocess import NuScenesProcessor
         
